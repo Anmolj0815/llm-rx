@@ -29,7 +29,8 @@ try:
     from langchain.schema import Document
     from langchain_groq import ChatGroq
     from langchain.chains import RetrievalQA
-    from langchain_community.document_loaders import PyPDFLoader # Keep only PyPDFLoader
+    # --- IMPORTANT: ONLY PyPDFLoader IS IMPORTED HERE ---
+    from langchain_community.document_loaders import PyPDFLoader
     from langchain_huggingface import HuggingFaceEndpointEmbeddings
     from langchain.prompts import PromptTemplate
     from langchain.retrievers import EnsembleRetriever
@@ -40,7 +41,6 @@ try:
 except ImportError as e:
     print(f"❌ LangChain import error: {e}")
     print("Please install missing dependencies:")
-    # Removed unstructured and its specific dependencies from this list
     print("pip install langchain langchain-community langchain-groq langchain-huggingface faiss-cpu pypdf requests rank-bm25")
     exit(1)
 except Exception as e:
@@ -363,7 +363,7 @@ vector_store = None
 hybrid_retriever = None
 processed_documents_global = []
 
-# Helper functions (Modified to remove DOCX/EML specific parts)
+# Helper functions (Modified to only handle PDF URLs and plain text)
 def is_url(string: str) -> bool:
     try:
         result = urlparse(string)
@@ -491,10 +491,10 @@ def root():
             "Hybrid retrieval (Vector + BM25)",
             "Confidence scoring",
             "Audit trail support",
-            "PDF document processing", # Updated
+            "PDF document processing", # Updated feature list
             "LLM-powered query parsing for claim details"
         ],
-        "supported_formats": ["text", "pdf_urls"], # Updated
+        "supported_formats": ["text", "pdf_urls"], # Updated supported formats
         "endpoints": {
             "health": "/health",
             "rag_status": "/rag-status",
@@ -723,7 +723,7 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
             model_used=llm.model_name if llm else "N/A",
             timestamp=datetime.now().isoformat(),
             llm_parser_used=llm_parser_used,
-            llm_parser_output=effective_claim_details # Changed to effective_claim_details for full output
+            llm_parser_output=effective_claim_details
         )
 
         return EnhancedAnswerResponse(
@@ -753,7 +753,7 @@ if __name__ == "__main__":
     print("   - Hybrid retrieval (Vector + BM25)")
     print("   - Audit trail and processing metadata")
     print("   - Policy section referencing")
-    print("   - **PDF document processing via URL**") # Updated feature list
+    print("   - **PDF document processing via URL**")
     print("   - **LLM-powered query parsing for structured claim details**")
 
     uvicorn.run(app, host=HOST, port=PORT)
