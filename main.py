@@ -29,18 +29,19 @@ try:
     from langchain.schema import Document
     from langchain_groq import ChatGroq
     from langchain.chains import RetrievalQA
-    from langchain_community.document_loaders import PyPDFLoader, UnstructuredWordLoader, UnstructuredEmailLoader
+    from langchain_community.document_loaders import PyPDFLoader # Keep only PyPDFLoader
     from langchain_huggingface import HuggingFaceEndpointEmbeddings
     from langchain.prompts import PromptTemplate
     from langchain.retrievers import EnsembleRetriever
     from langchain_community.retrievers import BM25Retriever
-    from langchain_core.exceptions import OutputParserException # For handling LLM JSON parsing issues
+    from langchain_core.exceptions import OutputParserException
 
-    print("✅ All LangChain imports successful")
+    print("✅ All necessary LangChain imports successful")
 except ImportError as e:
     print(f"❌ LangChain import error: {e}")
     print("Please install missing dependencies:")
-    print("pip install langchain langchain-community langchain-groq langchain-huggingface faiss-cpu pypdf requests rank-bm25 unstructured python-docx eml_parser lxml")
+    # Removed unstructured and its specific dependencies from this list
+    print("pip install langchain langchain-community langchain-groq langchain-huggingface faiss-cpu pypdf requests rank-bm25")
     exit(1)
 except Exception as e:
     print(f"❌ General import error: {e}")
@@ -52,7 +53,6 @@ class DebugRequest(BaseModel):
 
 class ClaimRequest(BaseModel):
     documents: Union[List[str], str]
-    # claim_details can be partially or fully provided, or empty for LLM parsing
     claim_details: Dict[str, Any] = Field(default_factory=dict)
     questions: List[str]
 
@@ -64,8 +64,8 @@ class ParsedClaimDetails(BaseModel):
     claim_date: Optional[str] = None # YYYY-MM-DD
     requested_amount: Optional[float] = None
     has_other_insurance: Optional[bool] = None
-    primary_insurance_payment: Optional[float] = None # Added for coordination of benefits parsing
-    policy_duration_months: Optional[int] = None # Calculated or parsed
+    primary_insurance_payment: Optional[float] = None
+    policy_duration_months: Optional[int] = None
 
 class CoordinationOfBenefits(BaseModel):
     has_other_insurance: bool = False
@@ -76,7 +76,7 @@ class CoordinationOfBenefits(BaseModel):
 
 class ClaimDecision(BaseModel):
     question: str
-    decision: str  # "APPROVED", "DENIED", "PENDING_REVIEW"
+    decision: str
     confidence_score: float = Field(ge=0.0, le=1.0)
     payout_amount: Optional[float] = None
     reasoning: str
@@ -91,8 +91,8 @@ class ProcessingMetadata(BaseModel):
     chunks_analyzed: int
     model_used: str
     timestamp: str
-    llm_parser_used: bool # New field
-    llm_parser_output: Optional[Dict[str, Any]] # New field
+    llm_parser_used: bool
+    llm_parser_output: Optional[Dict[str, Any]]
 
 class EnhancedAnswerResponse(BaseModel):
     decisions: List[ClaimDecision]
@@ -121,7 +121,7 @@ security = HTTPBearer()
 HF_TOKEN = os.getenv("HF_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 HOST = os.getenv("HOST", "0.0.0.0")
-PORT = int(os.getenv("PORT", 5000)) # Default to 5000, but often set to 8000 for hackathons
+PORT = int(os.getenv("PORT", 5000))
 
 # Enhanced Insurance-Specific Prompt Template for Claim Decision
 INSURANCE_CLAIM_PROMPT = """
@@ -204,7 +204,6 @@ Query: {query}
 Extracted Claim Details (JSON format only):
 """
 
-
 # Create the enhanced prompt templates
 ENHANCED_CLAIM_PROMPT = PromptTemplate(
     template=INSURANCE_CLAIM_PROMPT,
@@ -244,17 +243,12 @@ class InsuranceDecisionEngine:
 
     def calculate_confidence_score(self, context: str, decision_factors: Dict) -> float:
         """Calculate confidence score based on various factors - now mostly handled by LLM, but can be refined"""
-        # This function is less critical now as LLM provides confidence, but can be a fallback/validator
         score = decision_factors.get('confidence_score', 0.5)
-        # If LLM didn't provide confidence, apply basic heuristic
-        if score < 0.1: # Likely LLM failed to parse
-            # Boost confidence if specific policy sections are mentioned
+        if score < 0.1:
             if decision_factors.get('policy_sections_referenced'):
                 score += 0.2
-            # Reduce confidence if coordination of benefits is involved
             if decision_factors.get('has_coordination'):
                 score -= 0.1
-            # Boost confidence if clear dollar amounts are present
             if decision_factors.get('has_amounts'):
                 score += 0.1
         return max(0.0, min(1.0, score))
@@ -266,8 +260,7 @@ class HybridRetriever:
     def __init__(self, vector_store, documents):
         self.vector_store = vector_store
         self.documents = documents
-        self.bm25_retriever = None # Initialize as None
-        # BM25 setup moved to a method call to handle cases where documents might be empty initially
+        self.bm25_retriever = None
         self.setup_bm25_retriever()
 
     def setup_bm25_retriever(self):
@@ -295,7 +288,6 @@ class HybridRetriever:
         """Retrieve documents using hybrid approach"""
         all_docs = []
 
-        # Vector-based retrieval
         vector_retriever = self.vector_store.as_retriever(
             search_type="similarity",
             search_kwargs={"k": k, "fetch_k": k * 2}
@@ -303,7 +295,6 @@ class HybridRetriever:
         vector_docs = vector_retriever.get_relevant_documents(query)
         all_docs.extend(vector_docs)
 
-        # BM25 keyword retrieval (if available)
         if self.bm25_retriever:
             try:
                 bm25_docs = self.bm25_retriever.get_relevant_documents(query)
@@ -311,7 +302,6 @@ class HybridRetriever:
             except Exception as e:
                 print(f"⚠️ BM25 retrieval failed: {e}")
 
-        # Remove duplicates and return top k
         unique_docs = []
         seen_content = set()
         for doc in all_docs:
@@ -333,7 +323,6 @@ try:
 except Exception as e:
     print(f"❌ Error initializing HuggingFaceEndpointEmbeddings: {e}")
     try:
-        # Fallback to local embeddings if endpoint fails
         embeddings = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-MiniLM-L6-v2"
         )
@@ -344,39 +333,37 @@ except Exception as e:
 
 try:
     llm = ChatGroq(
-        model="llama-3.3-70b-versatile", # Or 'llama-3.1-8b-chatform' for faster, smaller model
+        model="llama-3.3-70b-versatile",
         groq_api_key=GROQ_API_KEY,
-        temperature=0 # Lower temperature for factual answers
+        temperature=0
     )
     print("✅ LLM initialized successfully")
 except Exception as e:
     print(f"❌ Error initializing LLM: {e}")
     llm = None
 
-# Enhanced text splitter for insurance documents
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1000,
     chunk_overlap=200,
     separators=[
-        "\n\n### ",  # Policy sections (often start with headings)
-        "\n\nSection ",  # Section breaks
-        "\n\nClause ",    # Clause breaks
-        "\n\n",          # Paragraphs
-        "\n",            # Lines
-        ". ",            # Sentences
-        " ",             # Words
+        "\n\n### ",
+        "\n\nSection ",
+        "\n\nClause ",
+        "\n\n",
+        "\n",
+        ". ",
+        " ",
     ],
     length_function=len,
     keep_separator=True
 )
 
-# Initialize decision engine and global variables
 decision_engine = InsuranceDecisionEngine()
 vector_store = None
 hybrid_retriever = None
-processed_documents_global = [] # Store Document objects, not just content
+processed_documents_global = []
 
-# Helper functions
+# Helper functions (Modified to remove DOCX/EML specific parts)
 def is_url(string: str) -> bool:
     try:
         result = urlparse(string)
@@ -403,47 +390,9 @@ def extract_pdf_content(pdf_url: str) -> List[Document]:
         print(f"❌ Error extracting PDF content from {pdf_url}: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Failed to extract PDF content: {str(e)}")
 
-def extract_docx_content(docx_url: str) -> List[Document]:
-    try:
-        print(f"📥 Downloading DOCX from: {docx_url}")
-        response = requests.get(docx_url, timeout=30)
-        response.raise_for_status()
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as temp_file:
-            temp_file.write(response.content)
-            temp_path = temp_file.name
-
-        loader = UnstructuredWordLoader(temp_path)
-        docs = loader.load()
-        os.unlink(temp_path)
-        print(f"✅ DOCX extracted successfully. Loaded {len(docs)} pages/sections.")
-        return docs
-    except Exception as e:
-        print(f"❌ Error extracting DOCX content from {docx_url}: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Failed to extract DOCX content: {str(e)}")
-
-def extract_eml_content(eml_url: str) -> List[Document]:
-    try:
-        print(f"📥 Downloading EML from: {eml_url}")
-        response = requests.get(eml_url, timeout=30)
-        response.raise_for_status()
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.eml') as temp_file:
-            temp_file.write(response.content)
-            temp_path = temp_file.name
-
-        loader = UnstructuredEmailLoader(temp_path)
-        docs = loader.load()
-        os.unlink(temp_path)
-        print(f"✅ EML extracted successfully. Loaded {len(docs)} content sections.")
-        return docs
-    except Exception as e:
-        print(f"❌ Error extracting EML content from {eml_url}: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Failed to extract EML content: {str(e)}")
-
-
+# This function is now simplified to only handle PDF URLs and plain text
 def process_input_documents(documents_input: Union[List[str], str]) -> List[Document]:
-    """Processes URLs (PDF, DOCX, EML) and plain text into LangChain Document objects."""
+    """Processes PDF URLs and plain text into LangChain Document objects."""
     if isinstance(documents_input, str):
         documents_input = [documents_input]
 
@@ -454,28 +403,22 @@ def process_input_documents(documents_input: Union[List[str], str]) -> List[Docu
             doc_item_lower = doc_item.lower()
             if doc_item_lower.endswith('.pdf'):
                 all_loaded_docs.extend(extract_pdf_content(doc_item))
-            elif doc_item_lower.endswith('.docx') or doc_item_lower.endswith('.doc'):
-                all_loaded_docs.extend(extract_docx_content(doc_item))
-            elif doc_item_lower.endswith('.eml'):
-                all_loaded_docs.extend(extract_eml_content(doc_item))
             else:
-                raise HTTPException(status_code=400, detail=f"URL format not supported: {doc_item}. Only .pdf, .docx, .eml are supported.")
+                # Only PDF URLs supported now
+                raise HTTPException(status_code=400, detail=f"URL format not supported: {doc_item}. Only .pdf URLs are supported.")
         else:
             # Assume it's plain text content
             all_loaded_docs.append(Document(page_content=doc_item))
 
     return all_loaded_docs
 
-
 def parse_llm_response(response_text: str, default_confidence: float = 0.5) -> Dict:
     """Parse structured JSON response from LLM with more robust error handling."""
     try:
-        # Try to extract JSON from response, allowing for pre/post text
         json_match = re.search(r'\{.*\}', response_text.strip(), re.DOTALL)
         if json_match:
             json_str = json_match.group(0)
             parsed_data = json.loads(json_str)
-            # Ensure required fields are present with defaults if missing
             return {
                 "decision": parsed_data.get("decision", "PENDING_REVIEW"),
                 "confidence_score": parsed_data.get("confidence_score", default_confidence),
@@ -483,7 +426,7 @@ def parse_llm_response(response_text: str, default_confidence: float = 0.5) -> D
                 "reasoning": parsed_data.get("reasoning", "No specific reasoning provided by LLM."),
                 "policy_sections_referenced": parsed_data.get("policy_sections_referenced", []),
                 "exclusions_applied": parsed_data.get("exclusions_applied", []),
-                "coordination_of_benefits": parsed_data.get("coordination_of_benefits"), # Can be None
+                "coordination_of_benefits": parsed_data.get("coordination_of_benefits"),
                 "processing_notes": parsed_data.get("processing_notes", [])
             }
         else:
@@ -492,7 +435,7 @@ def parse_llm_response(response_text: str, default_confidence: float = 0.5) -> D
         print(f"⚠️ JSON parsing failed or no JSON found: {e}. Raw response: {response_text[:200]}...")
         return {
             "decision": "PENDING_REVIEW",
-            "confidence_score": 0.1, # Low confidence due to parsing failure
+            "confidence_score": 0.1,
             "payout_amount": None,
             "reasoning": f"LLM response parsing failed or unstructured response: {response_text}. Error: {str(e)}",
             "policy_sections_referenced": [],
@@ -548,10 +491,10 @@ def root():
             "Hybrid retrieval (Vector + BM25)",
             "Confidence scoring",
             "Audit trail support",
-            "DOCX, PDF, EML document processing", # Added feature
-            "LLM-powered query parsing for claim details" # Added feature
+            "PDF document processing", # Updated
+            "LLM-powered query parsing for claim details"
         ],
-        "supported_formats": ["text", "pdf_urls", "docx_urls", "eml_urls"], # Updated
+        "supported_formats": ["text", "pdf_urls"], # Updated
         "endpoints": {
             "health": "/health",
             "rag_status": "/rag-status",
@@ -596,7 +539,7 @@ async def debug_search(request: DebugRequest):
     try:
         if hybrid_retriever:
             docs = hybrid_retriever.retrieve_relevant_docs(request.question, k=6)
-        else: # Fallback if hybrid_retriever somehow not initialized
+        else:
             retriever = vector_store.as_retriever(
                 search_type="similarity",
                 search_kwargs={"k": 6, "fetch_k": 12}
@@ -609,11 +552,10 @@ async def debug_search(request: DebugRequest):
                 "chunk_id": i,
                 "content": doc.page_content[:500] + "..." if len(doc.page_content) > 500 else doc.page_content,
                 "full_length": len(doc.page_content),
-                "source": doc.metadata.get('source', 'unknown'), # Add source if available
-                "page": doc.metadata.get('page', 'N/A') # Add page if available (from PDFs)
+                "source": doc.metadata.get('source', 'unknown'),
+                "page": doc.metadata.get('page', 'N/A')
             })
 
-        # Add decision engine analysis (basic detection here, full analysis in /hackrx/run)
         has_cob = decision_engine.detect_coordination_of_benefits(
             " ".join([doc.page_content for doc in docs]),
             request.question
@@ -645,13 +587,11 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
     audit_trail = [f"Request {request_id} started at {datetime.now().isoformat()}"]
     llm_parser_used = False
     parsed_claim_details_output = {}
-    effective_claim_details = request.claim_details.copy() # Start with provided details
+    effective_claim_details = request.claim_details.copy()
 
     try:
-        # Step 0: LLM Parser - Extract structured query details if not provided
         if not effective_claim_details and request.questions:
             audit_trail.append("Attempting LLM-powered claim details extraction.")
-            # Use the first question for overall claim details parsing
             parsed_details = parse_claim_details_from_llm(request.questions[0], llm)
             if parsed_details:
                 effective_claim_details.update(parsed_details)
@@ -666,8 +606,6 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
             audit_trail.append("No claim details provided and no questions to parse from. Proceeding without specific claim details.")
 
 
-        # Step 1: Process documents
-        # This will return a List[Document] from various sources
         loaded_docs_from_input = process_input_documents(request.documents)
         audit_trail.append(f"Input documents processed. Total loaded documents: {len(loaded_docs_from_input)}")
 
@@ -678,7 +616,6 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
         print(f"Created {len(chunks)} chunks from documents")
         audit_trail.append(f"Created {len(chunks)} document chunks from all inputs")
 
-        # Create or update vector store
         if vector_store is None:
             print("Creating new vector store...")
             vector_store = FAISS.from_documents(chunks, embeddings)
@@ -692,12 +629,10 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
             print("✅ Documents added to existing vector store.")
             audit_trail.append(f"{len(chunks)} new document chunks added to existing vector store.")
 
-        # Re-initialize hybrid retriever with updated global documents
         hybrid_retriever = HybridRetriever(vector_store, processed_documents_global)
         audit_trail.append("Hybrid retriever re-initialized with current document set.")
 
 
-        # Step 2: Process each question with enhanced decision logic
         decisions = []
         if not request.questions:
             raise HTTPException(status_code=400, detail="No questions provided for processing.")
@@ -707,12 +642,10 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
                 print(f"Processing question: {question}")
                 audit_trail.append(f"Processing question: '{question[:70]}...'")
 
-                # Enhanced retrieval with multiple strategies
                 relevant_docs = hybrid_retriever.retrieve_relevant_docs(question, k=8)
 
                 if relevant_docs:
                     context = "\n\n".join([doc.page_content for doc in relevant_docs])
-                    # Pass structured claim details to the LLM prompt
                     claim_details_for_llm = json.dumps(effective_claim_details, indent=2) if effective_claim_details else "{}"
                     formatted_prompt = ENHANCED_CLAIM_PROMPT.format(
                         context=context,
@@ -720,14 +653,11 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
                         claim_details_json=claim_details_for_llm
                     )
 
-                    # Get LLM response
                     llm_result = llm.invoke(formatted_prompt)
                     response_text = llm_result.content if hasattr(llm_result, 'content') else str(llm_result)
 
-                    # Parse structured response
                     parsed_response = parse_llm_response(response_text)
 
-                    # Create decision object with enhanced data
                     decision = ClaimDecision(
                         question=question,
                         decision=parsed_response.get("decision", "PENDING_REVIEW"),
@@ -739,10 +669,8 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
                         processing_notes=parsed_response.get("processing_notes", [])
                     )
 
-                    # Add coordination of benefits if detected and structured
                     cob_data = parsed_response.get("coordination_of_benefits")
                     if cob_data and isinstance(cob_data, dict) and cob_data.get("has_other_insurance") is not None:
-                         # Ensure all fields are correctly typed for Pydantic model
                         if 'primary_payment' in cob_data and not isinstance(cob_data['primary_payment'], (int, float)):
                             try: cob_data['primary_payment'] = float(cob_data['primary_payment'])
                             except ValueError: cob_data['primary_payment'] = None
@@ -756,9 +684,9 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
                             decision.coordination_of_benefits = CoordinationOfBenefits(**cob_data)
                         except Exception as cob_e:
                             decision.processing_notes.append(f"Error parsing COB data: {cob_e}. Raw: {cob_data}")
-                            decision.coordination_of_benefits = None # Ensure it's correctly set or None
+                            decision.coordination_of_benefits = None
                     else:
-                        decision.coordination_of_benefits = CoordinationOfBenefits(has_other_insurance=False) # Default to false if not provided
+                        decision.coordination_of_benefits = CoordinationOfBenefits(has_other_insurance=False)
 
                     decisions.append(decision)
                     audit_trail.append(f"Decision generated for '{question[:50]}...': {decision.decision} (confidence: {decision.confidence_score})")
@@ -788,7 +716,6 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
         processing_time = time.time() - start_time
         audit_trail.append(f"Processing completed in {processing_time:.2f} seconds")
 
-        # Create processing metadata
         metadata = ProcessingMetadata(
             request_id=request_id,
             processing_time=processing_time,
@@ -796,7 +723,7 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
             model_used=llm.model_name if llm else "N/A",
             timestamp=datetime.now().isoformat(),
             llm_parser_used=llm_parser_used,
-            llm_parser_output=parsed_claim_details_output
+            llm_parser_output=effective_claim_details # Changed to effective_claim_details for full output
         )
 
         return EnhancedAnswerResponse(
@@ -806,7 +733,6 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
         )
 
     except HTTPException as http_e:
-        # Re-raise HTTP exceptions (e.g., 400 Bad Request from document processing)
         audit_trail.append(f"Client-side error: {http_e.detail}")
         raise http_e
     except Exception as e:
@@ -827,11 +753,7 @@ if __name__ == "__main__":
     print("   - Hybrid retrieval (Vector + BM25)")
     print("   - Audit trail and processing metadata")
     print("   - Policy section referencing")
-    print("   - **NEW: DOCX, PDF, EML document processing via URL**")
-    print("   - **NEW: LLM-powered query parsing for structured claim details**")
-
-    # This example ensures the server tries to load embeddings/LLM on startup
-    # You might want to pre-load documents here for immediate use, but for dynamic input,
-    # it's best to process them via the API endpoint.
+    print("   - **PDF document processing via URL**") # Updated feature list
+    print("   - **LLM-powered query parsing for structured claim details**")
 
     uvicorn.run(app, host=HOST, port=PORT)
