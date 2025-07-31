@@ -1,5 +1,5 @@
 langchain
-langchain-community>=0.0.30  # Or keep ==0.0.38 if that was stable for you
+langchain-community>=0.0.30
 langchain-groq
 langchain-huggingface
 faiss-cpu
