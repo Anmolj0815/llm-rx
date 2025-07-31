@@ -1,5 +1,5 @@
 langchain
-langchain-community>=0.0.30  # MUST be at least 0.0.30 for UnstructuredLoaders
+langchain-community==0.0.38 # <--- CHANGE THIS
 langchain-groq
 langchain-huggingface
 faiss-cpu
