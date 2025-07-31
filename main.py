@@ -38,14 +38,13 @@ try:
     from langchain.retrievers import EnsembleRetriever
     from langchain_community.retrievers import BM25Retriever
     from langchain_core.exceptions import OutputParserException
-    # --- NEW: For re-ranking ---
-    from sentence_transformers import CrossEncoder
+    # --- REMOVED: from sentence_transformers import CrossEncoder ---
 
-    print("✅ All necessary LangChain and re-ranker imports successful")
+    print("✅ All necessary LangChain imports successful")
 except ImportError as e:
     print(f"❌ Import error: {e}")
     print("Please install missing dependencies:")
-    print("pip install langchain langchain-community langchain-groq langchain-huggingface faiss-cpu pypdf requests rank-bm25 sentence-transformers")
+    print("pip install langchain langchain-community langchain-groq langchain-huggingface faiss-cpu pypdf requests rank-bm25") # Removed sentence-transformers
     exit(1)
 except Exception as e:
     print(f"❌ General import error: {e}")
@@ -322,7 +321,7 @@ class HybridRetriever:
 # Initialize components with enhanced error handling
 embeddings = None
 llm = None
-cross_encoder_reranker = None # --- NEW: Cross-encoder re-ranker model ---
+# --- REMOVED: cross_encoder_reranker initialization ---
 
 try:
     embeddings = HuggingFaceEndpointEmbeddings(
@@ -352,13 +351,7 @@ except Exception as e:
     print(f"❌ Error initializing LLM: {e}")
     llm = None
 
-# --- NEW: Initialize Cross-Encoder for re-ranking ---
-try:
-    cross_encoder_reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
-    print("✅ Cross-Encoder re-ranker initialized successfully")
-except Exception as e:
-    print(f"❌ Error initializing Cross-Encoder re-ranker: {e}. Re-ranking will be skipped.")
-    cross_encoder_reranker = None
+# --- REMOVED: Cross-Encoder initialization block ---
 
 
 text_splitter = RecursiveCharacterTextSplitter(
@@ -522,8 +515,8 @@ def root():
             "Coordination of benefits analysis (internal)",
             "**STRICT API Output: {'answers': [...] }**",
             "Hybrid retrieval (Vector + BM25)",
-            "**Re-ranking of retrieved documents**", # Highlight new feature
-            "**Persistent FAISS Indexing (offline/on-startup)**", # Highlight new feature
+            # --- REMOVED: "Re-ranking of retrieved documents (for better accuracy)" ---
+            "**Persistent FAISS Indexing (improves latency after first run/restart)**",
             "PDF document processing",
             "LLM-powered query parsing for claim details",
             "Robust local file path detection in document URLs",
@@ -549,19 +542,8 @@ def health_check():
         "vector_store_ready": vector_store is not None,
         "decision_engine_ready": decision_engine is not None,
         "hybrid_retriever_ready": hybrid_retriever is not None,
-        "cross_encoder_reranker_ready": cross_encoder_reranker is not None, # NEW
+        # --- REMOVED: "cross_encoder_reranker_ready": cross_encoder_reranker is not None, ---
         "processed_documents_count": len(processed_documents_global)
-    }
-
-@app.get("/decision-engine-status")
-def decision_engine_status():
-    """Check decision engine configuration and rules"""
-    return {
-        "engine_active": True,
-        "decision_rules": decision_engine.decision_rules,
-        "supported_decisions": ["APPROVED", "DENIED", "PENDING_REVIEW"],
-        "coordination_benefits_supported": True,
-        "confidence_scoring_enabled": True
     }
 
 @app.post("/debug-search")
@@ -582,12 +564,13 @@ async def debug_search(request: DebugRequest):
             )
             docs = retriever.get_relevant_documents(request.question)
 
-        # --- NEW: Re-ranking for Debug Search too ---
-        if cross_encoder_reranker and docs:
-            pairs = [(request.question, doc.page_content) for doc in docs]
-            scores = cross_encoder_reranker.predict(pairs)
-            ranked_docs = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
-            docs = [doc for score, doc in ranked_docs[:6]] # Select top 6 for debug display
+        # --- REMOVED: Re-ranking for Debug Search ---
+        # if cross_encoder_reranker and docs:
+        #     pairs = [(request.question, doc.page_content) for doc in docs]
+        #     scores = cross_encoder_reranker.predict(pairs)
+        #     ranked_docs = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
+        #     docs = [doc for score, doc in ranked_docs[:6]] # Select top 6 for debug display
+
 
         retrieved_chunks = []
         for i, doc in enumerate(docs):
@@ -608,7 +591,7 @@ async def debug_search(request: DebugRequest):
             "question": request.question,
             "total_chunks_retrieved": len(docs),
             "retrieval_method": "hybrid" if hybrid_retriever else "vector_only",
-            "re_ranking_applied": cross_encoder_reranker is not None, # Indicate if re-ranking was used
+            "re_ranking_applied": False, # Explicitly state re-ranking is OFF
             "chunks": retrieved_chunks,
             "decision_engine_analysis": {
                 "coordination_of_benefits_detected": has_cob,
@@ -650,6 +633,7 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
             audit_trail.append("Claim details provided, skipping LLM parser for details.")
         else:
             audit_trail.append("No claim details provided and no questions to parse from. Proceeding without specific claim details.")
+
 
         # Step 1: Document Processing and FAISS Index Management (Persistence)
         loaded_docs_from_input = process_input_documents(request.documents)
@@ -717,26 +701,34 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
                 print(f"Processing question: {question}")
                 audit_trail.append(f"Processing question: '{question[:70]}...'")
 
-                # Retrieve relevant documents using hybrid approach
-                relevant_docs = hybrid_retriever.retrieve_relevant_docs(question, k=10) # Retrieve more for re-ranking
+                # Retrieve relevant documents using hybrid approach (K increased to 10 for potentially better initial recall)
+                relevant_docs = hybrid_retriever.retrieve_relevant_docs(question, k=10)
 
-                # --- NEW: Re-ranking step ---
-                if cross_encoder_reranker and relevant_docs:
-                    pairs = [(question, doc.page_content) for doc in relevant_docs]
-                    scores = cross_encoder_reranker.predict(pairs)
-                    # Sort documents by score in descending order
-                    ranked_docs_with_scores = sorted(zip(scores, relevant_docs), key=lambda x: x[0], reverse=True)
-                    # Select top N documents after re-ranking (e.g., top 4 or 6)
-                    k_reranked = min(6, len(ranked_docs_with_scores)) # Don't take more than available
-                    top_reranked_docs = [doc for score, doc in ranked_docs_with_scores[:k_reranked]]
-                    context = "\n\n".join([doc.page_content for doc in top_reranked_docs])
-                    audit_trail.append(f"Re-ranking applied. Using top {k_reranked} documents.")
-                elif relevant_docs:
-                    context = "\n\n".join([doc.page_content for doc in relevant_docs[:6]]) # Fallback to top 6 if no re-ranker
-                    audit_trail.append("Re-ranking skipped. Using top 6 documents from hybrid retrieval.")
+                # --- REMOVED: Re-ranking step ---
+                # if cross_encoder_reranker and relevant_docs:
+                #     pairs = [(question, doc.page_content) for doc in relevant_docs]
+                #     scores = cross_encoder_reranker.predict(pairs)
+                #     ranked_docs_with_scores = sorted(zip(scores, relevant_docs), key=lambda x: x[0], reverse=True)
+                #     k_final_context = min(6, len(ranked_docs_with_scores))
+                #     top_context_docs = [doc for score, doc in ranked_docs_with_scores[:k_final_context]]
+                #     context = "\n\n".join([doc.page_content for doc in top_context_docs])
+                #     audit_trail.append(f"Re-ranking applied. Using top {k_final_context} documents.")
+                # elif relevant_docs:
+                #     context = "\n\n".join([doc.page_content for doc in relevant_docs[:6]])
+                #     audit_trail.append("Re-ranking skipped. Using top 6 documents from hybrid retrieval.")
+                # else:
+                #     context = ""
+                #     audit_trail.append("No relevant documents found, context is empty.")
+                
+                # --- Simplified context generation since re-ranking is removed ---
+                if relevant_docs:
+                    # Take top 6 from hybrid retrieval as context for LLM
+                    context = "\n\n".join([doc.page_content for doc in relevant_docs[:6]])
+                    audit_trail.append(f"Using top {min(len(relevant_docs), 6)} documents from hybrid retrieval for context.")
                 else:
                     context = "" # No relevant documents found
                     audit_trail.append("No relevant documents found, context is empty.")
+
 
                 # Only proceed to LLM if there's context or explicit claim details
                 if context or effective_claim_details:
@@ -798,7 +790,7 @@ if __name__ == "__main__":
     print("   - Coordination of benefits analysis (internal)")
     print("   - **STRICT API Output: {'answers': [...] }**")
     print("   - Hybrid retrieval (Vector + BM25)")
-    print("   - **Re-ranking of retrieved documents (for better accuracy)**")
+    # --- REMOVED FEATURE: "Re-ranking of retrieved documents (for better accuracy)" ---
     print("   - **Persistent FAISS Indexing (improves latency after first run/restart)**")
     print("   - PDF document processing")
     print("   - LLM-powered query parsing for claim details")
