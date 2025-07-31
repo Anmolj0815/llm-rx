@@ -16,6 +16,10 @@ import uuid
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
+# --- NEW IMPORTS for Google Gemini ---
+from langchain_google_genai import ChatGoogleGenerativeAI
+# --- END NEW IMPORTS ---
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -30,7 +34,7 @@ try:
     from langchain_huggingface import HuggingFaceEmbeddings
     from langchain.text_splitter import RecursiveCharacterTextSplitter
     from langchain.schema import Document
-    from langchain_groq import ChatGroq
+    # --- REMOVED: from langchain_groq import ChatGroq ---
     from langchain.chains import RetrievalQA
     from langchain_community.document_loaders import PyPDFLoader
     from langchain_huggingface import HuggingFaceEndpointEmbeddings
@@ -38,13 +42,13 @@ try:
     from langchain.retrievers import EnsembleRetriever
     from langchain_community.retrievers import BM25Retriever
     from langchain_core.exceptions import OutputParserException
-    # --- REMOVED: from sentence_transformers import CrossEncoder ---
 
     print("✅ All necessary LangChain imports successful")
 except ImportError as e:
     print(f"❌ Import error: {e}")
+    # Updated pip install message for Gemini setup
     print("Please install missing dependencies:")
-    print("pip install langchain langchain-community langchain-groq langchain-huggingface faiss-cpu pypdf requests rank-bm25") # Removed sentence-transformers
+    print("pip install langchain langchain-community langchain-google-genai langchain-huggingface faiss-cpu pypdf requests rank-bm25")
     exit(1)
 except Exception as e:
     print(f"❌ General import error: {e}")
@@ -116,12 +120,16 @@ security = HTTPBearer()
 
 # Configuration
 HF_TOKEN = os.getenv("HF_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# --- REMOVED: GROQ_API_KEY = os.getenv("GROQ_API_KEY") ---
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 5000))
 
+# --- NEW: Google Cloud/Gemini Specific Configuration ---
+GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
+GOOGLE_APPLICATION_CREDENTIALS_JSON = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+
 # --- MODIFIED: Enhanced Insurance-Specific Prompt Template for Claim Decision ---
-# Now includes ANSEWR EXAMPLES for desired length and format
+# Removed "Max 2-3 sentences" constraint, keeping direct and concise guidance
 INSURANCE_CLAIM_PROMPT = """
 You are an expert insurance claim processor with deep knowledge of policy terms, coverage rules, and claim evaluation. You must analyze claims systematically and provide structured decisions.
 
@@ -138,7 +146,7 @@ RESPONSE FORMAT (Must be valid JSON):
     "decision": "[APPROVED/DENIED/PENDING_REVIEW]",
     "confidence_score": [0.0-1.0],
     "payout_amount": [amount or null],
-    "reasoning": "A concise and direct answer to the question, summarizing the key information from the policy. Max 2-3 sentences.",
+    "reasoning": "A concise and direct answer to the question, summarizing the key information from the policy.",
     "policy_sections_referenced": ["section1", "section2"],
     "exclusions_applied": ["exclusion1", "exclusion2"],
     "coordination_of_benefits": {{
@@ -321,8 +329,30 @@ class HybridRetriever:
 # Initialize components with enhanced error handling
 embeddings = None
 llm = None
-# --- REMOVED: cross_encoder_reranker initialization ---
+# --- NEW: Function to set up Google Application Credentials from JSON string ---
+temp_creds_path = None # Global variable to store temporary credential file path
 
+def setup_google_credentials(json_string):
+    global temp_creds_path # Indicate we are modifying the global variable
+    if not json_string:
+        print("❌ GOOGLE_APPLICATION_CREDENTIALS_JSON is not set.")
+        return None
+    try:
+        # Create a temporary file to store the JSON credentials
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as temp_creds_file:
+            temp_creds_file.write(json_string)
+            temp_creds_file_path = temp_creds_file.name
+        
+        # Set the GOOGLE_APPLICATION_CREDENTIALS env var to the path of the temp file
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_creds_file_path
+        print(f"✅ Google Application Credentials set from JSON string via temporary file.")
+        temp_creds_path = temp_creds_file_path # Store path for cleanup
+        return temp_creds_file_path
+    except Exception as e:
+        print(f"❌ Error setting up Google Application Credentials: {e}")
+        return None
+
+# --- Embeddings Initialization ---
 try:
     embeddings = HuggingFaceEndpointEmbeddings(
         model="sentence-transformers/all-mpnet-base-v2",
@@ -340,19 +370,54 @@ except Exception as e:
         print(f"❌ All embedding methods failed: {e2}")
         embeddings = None
 
-try:
-    llm = ChatGroq(
-        model="llama-3.3-70b-versatile",
-        groq_api_key=GROQ_API_KEY,
-        temperature=0 # Lower temperature for factual answers
-    )
-    print("✅ LLM initialized successfully")
-except Exception as e:
-    print(f"❌ Error initializing LLM: {e}")
+
+# --- LLM Initialization Block: Prioritize Gemini, else fallback to Groq (if Groq import is available) ---
+if GCP_PROJECT_ID and GOOGLE_APPLICATION_CREDENTIALS_JSON:
+    print("Attempting to initialize Google Gemini LLM...")
+    temp_creds_path_local_var = setup_google_credentials(GOOGLE_APPLICATION_CREDENTIALS_JSON)
+    if temp_creds_path_local_var:
+        try:
+            llm = ChatGoogleGenerativeAI(
+                model="gemini-1.5-pro", # Using the best model for accuracy
+                project_id=GCP_PROJECT_ID,
+                temperature=0
+            )
+            llm.invoke("Hello, check connection.") # Simple test to ensure connection
+            print("✅ Google Gemini LLM initialized successfully.")
+        except Exception as e:
+            print(f"❌ Error initializing Google Gemini LLM: {e}")
+            llm = None
+    else:
+        print("❌ Could not set up Google credentials for Gemini.")
+        llm = None
+elif os.getenv("GROQ_API_KEY"): # Fallback to Groq only if GROQ_API_KEY is set
+    print("Google Gemini API keys not fully provided. Attempting to initialize Groq LLM...")
+    try:
+        from langchain_groq import ChatGroq # Import ChatGroq here if it's the fallback
+        llm = ChatGroq(
+            model="llama-3.3-70b-versatile",
+            groq_api_key=os.getenv("GROQ_API_KEY"),
+            temperature=0
+        )
+        llm.invoke("Hello, check connection.") # Simple test
+        print("✅ Groq LLM initialized successfully.")
+    except Exception as e:
+        print(f"❌ Error initializing Groq LLM: {e}")
+        llm = None
+else:
+    print("Neither Google Gemini nor Groq API keys are fully provided. LLM will not be initialized.")
     llm = None
 
-# --- REMOVED: Cross-Encoder initialization block ---
-
+# --- Optional: Clean up temporary credentials file on shutdown ---
+@app.on_event("shutdown")
+async def shutdown_event():
+    global temp_creds_path
+    if temp_creds_path and os.path.exists(temp_creds_path):
+        try:
+            os.remove(temp_creds_path)
+            print(f"🗑️ Cleaned up temporary credentials file: {temp_creds_path}")
+        except Exception as e:
+            print(f"⚠️ Error cleaning up temporary credentials file: {e}")
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1000,
@@ -471,7 +536,7 @@ def parse_llm_response(response_text: str, default_confidence: float = 0.5) -> D
         }
 
 
-def parse_claim_details_from_llm(query: str, llm_model: ChatGroq) -> Optional[Dict[str, Any]]:
+def parse_claim_details_from_llm(query: str, llm_model) -> Optional[Dict[str, Any]]: # Removed specific type hint for llm_model
     """Uses LLM to extract structured claim details from a natural language query."""
     try:
         formatted_prompt = LLM_PARSER_PROMPT_TEMPLATE.format(query=query)
@@ -515,12 +580,12 @@ def root():
             "Coordination of benefits analysis (internal)",
             "**STRICT API Output: {'answers': [...] }**",
             "Hybrid retrieval (Vector + BM25)",
-            # --- REMOVED: "Re-ranking of retrieved documents (for better accuracy)" ---
             "**Persistent FAISS Indexing (improves latency after first run/restart)**",
             "PDF document processing",
             "LLM-powered query parsing for claim details",
             "Robust local file path detection in document URLs",
-            "Prompt examples for concise answers"
+            "Prompt examples for concise answers",
+            "**Primary LLM: Google Gemini 1.5 Pro**" # Highlight new LLM
         ],
         "supported_formats": ["text", "pdf_urls"],
         "endpoints": {
@@ -542,7 +607,6 @@ def health_check():
         "vector_store_ready": vector_store is not None,
         "decision_engine_ready": decision_engine is not None,
         "hybrid_retriever_ready": hybrid_retriever is not None,
-        # --- REMOVED: "cross_encoder_reranker_ready": cross_encoder_reranker is not None, ---
         "processed_documents_count": len(processed_documents_global)
     }
 
@@ -563,14 +627,6 @@ async def debug_search(request: DebugRequest):
                 search_kwargs={"k": 8, "fetch_k": 16}
             )
             docs = retriever.get_relevant_documents(request.question)
-
-        # --- REMOVED: Re-ranking for Debug Search ---
-        # if cross_encoder_reranker and docs:
-        #     pairs = [(request.question, doc.page_content) for doc in docs]
-        #     scores = cross_encoder_reranker.predict(pairs)
-        #     ranked_docs = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
-        #     docs = [doc for score, doc in ranked_docs[:6]] # Select top 6 for debug display
-
 
         retrieved_chunks = []
         for i, doc in enumerate(docs):
@@ -704,22 +760,6 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
                 # Retrieve relevant documents using hybrid approach (K increased to 10 for potentially better initial recall)
                 relevant_docs = hybrid_retriever.retrieve_relevant_docs(question, k=10)
 
-                # --- REMOVED: Re-ranking step ---
-                # if cross_encoder_reranker and relevant_docs:
-                #     pairs = [(question, doc.page_content) for doc in relevant_docs]
-                #     scores = cross_encoder_reranker.predict(pairs)
-                #     ranked_docs_with_scores = sorted(zip(scores, relevant_docs), key=lambda x: x[0], reverse=True)
-                #     k_final_context = min(6, len(ranked_docs_with_scores))
-                #     top_context_docs = [doc for score, doc in ranked_docs_with_scores[:k_final_context]]
-                #     context = "\n\n".join([doc.page_content for doc in top_context_docs])
-                #     audit_trail.append(f"Re-ranking applied. Using top {k_final_context} documents.")
-                # elif relevant_docs:
-                #     context = "\n\n".join([doc.page_content for doc in relevant_docs[:6]])
-                #     audit_trail.append("Re-ranking skipped. Using top 6 documents from hybrid retrieval.")
-                # else:
-                #     context = ""
-                #     audit_trail.append("No relevant documents found, context is empty.")
-                
                 # --- Simplified context generation since re-ranking is removed ---
                 if relevant_docs:
                     # Take top 6 from hybrid retrieval as context for LLM
@@ -790,11 +830,11 @@ if __name__ == "__main__":
     print("   - Coordination of benefits analysis (internal)")
     print("   - **STRICT API Output: {'answers': [...] }**")
     print("   - Hybrid retrieval (Vector + BM25)")
-    # --- REMOVED FEATURE: "Re-ranking of retrieved documents (for better accuracy)" ---
     print("   - **Persistent FAISS Indexing (improves latency after first run/restart)**")
     print("   - PDF document processing")
     print("   - LLM-powered query parsing for claim details")
     print("   - Robust local file path detection in document URLs")
     print("   - Prompt examples for concise answers")
+    print("   - **Primary LLM: Google Gemini 1.5 Pro (via Service Account)**") # Highlight new LLM
 
     uvicorn.run(app, host=HOST, port=PORT)
