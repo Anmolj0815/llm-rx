@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+langchain
+langchain-community
+langchain-groq
+langchain-huggingface
+pydantic
+requests
+python-dotenv
+pypdf
+faiss-cpu
+typing-extensions
