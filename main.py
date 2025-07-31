@@ -491,10 +491,10 @@ def root():
             "Hybrid retrieval (Vector + BM25)",
             "Confidence scoring",
             "Audit trail support",
-            "PDF document processing", # Updated feature list
+            "PDF document processing",
             "LLM-powered query parsing for claim details"
         ],
-        "supported_formats": ["text", "pdf_urls"], # Updated supported formats
+        "supported_formats": ["text", "pdf_urls"],
         "endpoints": {
             "health": "/health",
             "rag_status": "/rag-status",
@@ -671,12 +671,20 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
 
                     cob_data = parsed_response.get("coordination_of_benefits")
                     if cob_data and isinstance(cob_data, dict) and cob_data.get("has_other_insurance") is not None:
-                        if 'primary_payment' in cob_data and not isinstance(cob_data['primary_payment'], (int, float)):
-                            try: cob_data['primary_payment'] = float(cob_data['primary_payment'])
-                            except ValueError: cob_data['primary_payment'] = None
-                        if 'remaining_amount' in cob_data and not isinstance(cob_data['remaining_amount'], (int, float)):
-                            try: cob_data['remaining_amount'] = float(cob_data['remaining_amount'])
-                            except ValueError: cob_data['remaining_amount'] = None
+                        # FIX: Only attempt float() conversion if the value is a string.
+                        # If it's already None, int, or float, Pydantic handles it.
+                        if 'primary_payment' in cob_data and isinstance(cob_data['primary_payment'], str):
+                            try:
+                                cob_data['primary_payment'] = float(cob_data['primary_payment'])
+                            except ValueError: # Catch ValueError for string conversion errors
+                                cob_data['primary_payment'] = None # Set to None if string cannot be converted
+                        
+                        if 'remaining_amount' in cob_data and isinstance(cob_data['remaining_amount'], str):
+                            try:
+                                cob_data['remaining_amount'] = float(cob_data['remaining_amount'])
+                            except ValueError: # Catch ValueError for string conversion errors
+                                cob_data['remaining_amount'] = None # Set to None if string cannot be converted
+                        
                         if 'has_other_insurance' in cob_data and not isinstance(cob_data['has_other_insurance'], bool):
                             cob_data['has_other_insurance'] = str(cob_data['has_other_insurance']).lower() == 'true'
 
