@@ -1,5 +1,5 @@
 langchain
-langchain-community==0.0.38 # <--- CHANGE THIS
+langchain-community>=0.0.30  # Or keep ==0.0.38 if that was stable for you
 langchain-groq
 langchain-huggingface
 faiss-cpu
@@ -9,7 +9,3 @@ rank-bm25
 python-dotenv
 uvicorn
 fastapi
-unstructured
-python-docx
-eml_parser
-lxml
