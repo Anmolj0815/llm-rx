@@ -6,7 +6,7 @@ from typing import List, Union, Optional, Dict, Any
 import time
 import os
 import requests
-import tempfile # Still needed for PDF download
+import tempfile
 import json
 import re
 from urllib.parse import urlparse
@@ -16,10 +16,8 @@ import uuid
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
-# --- NEW/MODIFIED IMPORTS for Google Gemini AI Studio API ---
+# --- NEW/MODIFIED IMPORTS for Google Gemini ---
 from langchain_google_genai import ChatGoogleGenerativeAI
-# --- If you want Groq as a fallback, ensure langchain_groq is in requirements.txt ---
-# from langchain_groq import ChatGroq
 # --- END NEW/MODIFIED IMPORTS ---
 
 # Load environment variables from .env file
@@ -36,7 +34,6 @@ try:
     from langchain_huggingface import HuggingFaceEmbeddings
     from langchain.text_splitter import RecursiveCharacterTextSplitter
     from langchain.schema import Document
-    # --- REMOVED: from langchain_groq import ChatGroq --- (Moved to conditional import)
     from langchain.chains import RetrievalQA
     from langchain_community.document_loaders import PyPDFLoader
     from langchain_huggingface import HuggingFaceEndpointEmbeddings
@@ -125,8 +122,7 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 5000))
 
-# --- MODIFIED: API Key Configuration for Google AI Studio API ---
-# GOOGLE_API_KEY is now the main key for Gemini
+# --- API Key Configuration for Google AI Studio API ---
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 # --- MODIFIED: Enhanced Insurance-Specific Prompt Template ---
@@ -355,7 +351,7 @@ if GOOGLE_API_KEY:
     print("Attempting to initialize Google Gemini LLM via AI Studio API Key...")
     try:
         llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-pro", # Using the best model for accuracy
+            model="gemini-1.5-flash", # Changed to flash as per your request
             google_api_key=GOOGLE_API_KEY, # Pass the simple API key directly
             temperature=0
         )
@@ -534,7 +530,7 @@ def root():
             "LLM-powered query parsing for claim details",
             "Robust local file path detection in document URLs",
             "Prompt examples for concise answers",
-            "**Primary LLM: Google Gemini 1.5 Pro (via AI Studio API Key)**" # Highlight new LLM
+            "**Primary LLM: Google Gemini 1.5 Flash (via AI Studio API Key)**" # Highlight new LLM
         ],
         "supported_formats": ["text", "pdf_urls"],
         "endpoints": {
@@ -784,6 +780,6 @@ if __name__ == "__main__":
     print("   - LLM-powered query parsing for claim details")
     print("   - Robust local file path detection in document URLs")
     print("   - Prompt examples for concise answers")
-    print("   - **Primary LLM: Google Gemini 1.5 Pro (via AI Studio API Key)**")
+    print("   - **Primary LLM: Google Gemini 1.5 Flash (via AI Studio API Key)**") # Highlight new LLM
 
     uvicorn.run(app, host=HOST, port=PORT)
