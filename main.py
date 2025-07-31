@@ -29,6 +29,7 @@ try:
     from langchain.schema import Document
     from langchain_groq import ChatGroq
     from langchain.chains import RetrievalQA
+    # --- IMPORTANT: ONLY PyPDFLoader IS IMPORTED HERE ---
     from langchain_community.document_loaders import PyPDFLoader
     from langchain_huggingface import HuggingFaceEndpointEmbeddings
     from langchain.prompts import PromptTemplate
@@ -394,7 +395,7 @@ def extract_pdf_content(pdf_url: str) -> List[Document]:
         raise HTTPException(status_code=400, detail=f"Failed to extract PDF content: {str(e)}")
 
 
-# --- MODIFIED: process_input_documents to explicitly check for local file paths ---
+# --- MODIFIED: process_input_documents to correctly check for .pdf in URL path ---
 def process_input_documents(documents_input: Union[List[str], str]) -> List[Document]:
     """
     Processes PDF URLs and plain text into LangChain Document objects.
@@ -415,17 +416,19 @@ def process_input_documents(documents_input: Union[List[str], str]) -> List[Docu
                 )
             # --- END NEW CHECK ---
 
-            if doc_item.lower().endswith('.pdf'):
+            # --- FIX APPLIED HERE for URLs with query parameters ---
+            parsed_url = urlparse(doc_item.lower()) # Parse the URL
+            if parsed_url.path.endswith('.pdf'): # Check if the PATH part ends with .pdf
                 all_loaded_docs.extend(extract_pdf_content(doc_item))
             else:
-                raise HTTPException(status_code=400, detail=f"URL format not supported: {doc_item}. Only .pdf URLs are supported.")
+                raise HTTPException(status_code=400, detail=f"URL format not supported: {doc_item}. Only .pdf URLs (or URLs with .pdf in their path) are supported.")
         else:
             # Assume it's plain text content
             all_loaded_docs.append(Document(page_content=doc_item))
 
     return all_loaded_docs
 
-# --- MODIFIED: parse_llm_response to conform to ClaimDecisionInternal ---
+# --- MODIFIED: parse_llm_response to conform to ClaimDecisionInternal (internal model) ---
 def parse_llm_response(response_text: str, default_confidence: float = 0.5) -> Dict:
     """Parse structured JSON response from LLM with more robust error handling."""
     try:
@@ -438,7 +441,7 @@ def parse_llm_response(response_text: str, default_confidence: float = 0.5) -> D
                 "decision": parsed_data.get("decision", "PENDING_REVIEW"),
                 "confidence_score": parsed_data.get("confidence_score", default_confidence),
                 "payout_amount": parsed_data.get("payout_amount"),
-                "reasoning": parsed_data.get("reasoning", "Information not found or unclear."), # Default answer if LLM fails
+                "reasoning": parsed_data.get("reasoning", "Information not found or unclear for this question."), # Default answer if LLM fails
                 "policy_sections_referenced": parsed_data.get("policy_sections_referenced", []),
                 "exclusions_applied": parsed_data.get("exclusions_applied", []),
                 "coordination_of_benefits": parsed_data.get("coordination_of_benefits"),
@@ -452,7 +455,7 @@ def parse_llm_response(response_text: str, default_confidence: float = 0.5) -> D
             "decision": "PENDING_REVIEW",
             "confidence_score": 0.1,
             "payout_amount": None,
-            "reasoning": f"An error occurred while processing this question. Details: {str(e)}", # Simpler error message for answer
+            "reasoning": f"An internal error occurred while processing this question. Details: {str(e)}", # Simpler error message for answer
             "policy_sections_referenced": [],
             "exclusions_applied": [],
             "coordination_of_benefits": None,
@@ -500,15 +503,14 @@ def root():
         "version": "2.0.0",
         "status": "running",
         "features": [
-            "Insurance claim decision engine",
-            "Coordination of benefits analysis",
-            "Structured JSON responses (internal)", # Clarified internal vs external
+            "Insurance claim decision engine (internal)", # Clarified internal vs external
+            "Coordination of benefits analysis (internal)",
+            "**STRICT API Output: {'answers': [...] }**", # Highlight new output
             "Hybrid retrieval (Vector + BM25)",
-            "Confidence scoring (internal)",
-            "Audit trail support (internal)",
             "PDF document processing",
             "LLM-powered query parsing for claim details",
-            "Strict answer format for API response" # New feature
+            "**Robust local file path detection in document URLs**", # Highlight new check
+            "**Prompt examples for concise answers**" # Highlight new prompt feature
         ],
         "supported_formats": ["text", "pdf_urls"],
         "endpoints": {
@@ -681,6 +683,7 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
                     response_text = llm_result.content if hasattr(llm_result, 'content') else str(llm_result)
 
                     # Parse structured response from LLM (using internal model for parsing)
+                    # This now expects a 'reasoning' field that contains the direct answer
                     parsed_llm_output = parse_llm_response(response_text)
 
                     # Extract the reasoning (which is now our desired answer)
@@ -727,8 +730,8 @@ if __name__ == "__main__":
     print("   - Coordination of benefits analysis (internal)")
     print("   - **STRICT API Output: {'answers': [...] }**") # Highlight new output
     print("   - Hybrid retrieval (Vector + BM25)")
-    print("   - PDF document processing via URL")
-    print("   - LLM-powered query parsing for structured claim details")
+    print("   - PDF document processing")
+    print("   - LLM-powered query parsing for claim details")
     print("   - **Robust local file path detection in document URLs**") # Highlight new check
     print("   - **Prompt examples for concise answers**") # Highlight new prompt feature
 
