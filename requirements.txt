@@ -1,6 +1,6 @@
 langchain
 langchain-community>=0.0.30
-langchain-google-genai # <-- NEW
+langchain-google-genai
 langchain-huggingface
 faiss-cpu
 pypdf
