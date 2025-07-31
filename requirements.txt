@@ -1,6 +1,6 @@
 langchain
 langchain-community>=0.0.30
-langchain-groq
+langchain-google-genai # <-- NEW
 langchain-huggingface
 faiss-cpu
 pypdf
@@ -9,4 +9,3 @@ rank-bm25
 python-dotenv
 uvicorn
 fastapi
-
