@@ -22,6 +22,9 @@ load_dotenv()
 # Only suppress tokenizer parallelism warnings (still useful for HuggingFace)
 os.environ['TOKENIZERS_PARALLELISM'] = os.getenv('TOKENIZERS_PARALLELISM', 'false')
 
+# --- NEW: Define path for FAISS index persistence ---
+FAISS_INDEX_PATH = "faiss_index_persistent"
+
 try:
     from langchain_community.vectorstores import FAISS
     from langchain_huggingface import HuggingFaceEmbeddings
@@ -29,19 +32,20 @@ try:
     from langchain.schema import Document
     from langchain_groq import ChatGroq
     from langchain.chains import RetrievalQA
-    # --- IMPORTANT: ONLY PyPDFLoader IS IMPORTED HERE ---
     from langchain_community.document_loaders import PyPDFLoader
     from langchain_huggingface import HuggingFaceEndpointEmbeddings
     from langchain.prompts import PromptTemplate
     from langchain.retrievers import EnsembleRetriever
     from langchain_community.retrievers import BM25Retriever
     from langchain_core.exceptions import OutputParserException
+    # --- NEW: For re-ranking ---
+    from sentence_transformers import CrossEncoder
 
-    print("✅ All necessary LangChain imports successful")
+    print("✅ All necessary LangChain and re-ranker imports successful")
 except ImportError as e:
-    print(f"❌ LangChain import error: {e}")
+    print(f"❌ Import error: {e}")
     print("Please install missing dependencies:")
-    print("pip install langchain langchain-community langchain-groq langchain-huggingface faiss-cpu pypdf requests rank-bm25")
+    print("pip install langchain langchain-community langchain-groq langchain-huggingface faiss-cpu pypdf requests rank-bm25 sentence-transformers")
     exit(1)
 except Exception as e:
     print(f"❌ General import error: {e}")
@@ -318,6 +322,8 @@ class HybridRetriever:
 # Initialize components with enhanced error handling
 embeddings = None
 llm = None
+cross_encoder_reranker = None # --- NEW: Cross-encoder re-ranker model ---
+
 try:
     embeddings = HuggingFaceEndpointEmbeddings(
         model="sentence-transformers/all-mpnet-base-v2",
@@ -345,6 +351,15 @@ try:
 except Exception as e:
     print(f"❌ Error initializing LLM: {e}")
     llm = None
+
+# --- NEW: Initialize Cross-Encoder for re-ranking ---
+try:
+    cross_encoder_reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+    print("✅ Cross-Encoder re-ranker initialized successfully")
+except Exception as e:
+    print(f"❌ Error initializing Cross-Encoder re-ranker: {e}. Re-ranking will be skipped.")
+    cross_encoder_reranker = None
+
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1000,
@@ -503,14 +518,16 @@ def root():
         "version": "2.0.0",
         "status": "running",
         "features": [
-            "Insurance claim decision engine (internal)", # Clarified internal vs external
+            "Insurance claim decision engine (internal)",
             "Coordination of benefits analysis (internal)",
-            "**STRICT API Output: {'answers': [...] }**", # Highlight new output
+            "**STRICT API Output: {'answers': [...] }**",
             "Hybrid retrieval (Vector + BM25)",
+            "**Re-ranking of retrieved documents**", # Highlight new feature
+            "**Persistent FAISS Indexing (offline/on-startup)**", # Highlight new feature
             "PDF document processing",
             "LLM-powered query parsing for claim details",
-            "**Robust local file path detection in document URLs**", # Highlight new check
-            "**Prompt examples for concise answers**" # Highlight new prompt feature
+            "Robust local file path detection in document URLs",
+            "Prompt examples for concise answers"
         ],
         "supported_formats": ["text", "pdf_urls"],
         "endpoints": {
@@ -532,6 +549,7 @@ def health_check():
         "vector_store_ready": vector_store is not None,
         "decision_engine_ready": decision_engine is not None,
         "hybrid_retriever_ready": hybrid_retriever is not None,
+        "cross_encoder_reranker_ready": cross_encoder_reranker is not None, # NEW
         "processed_documents_count": len(processed_documents_global)
     }
 
@@ -556,13 +574,20 @@ async def debug_search(request: DebugRequest):
 
     try:
         if hybrid_retriever:
-            docs = hybrid_retriever.retrieve_relevant_docs(request.question, k=6)
+            docs = hybrid_retriever.retrieve_relevant_docs(request.question, k=8) # Retrieve more for debug
         else:
             retriever = vector_store.as_retriever(
                 search_type="similarity",
-                search_kwargs={"k": 6, "fetch_k": 12}
+                search_kwargs={"k": 8, "fetch_k": 16}
             )
             docs = retriever.get_relevant_documents(request.question)
+
+        # --- NEW: Re-ranking for Debug Search too ---
+        if cross_encoder_reranker and docs:
+            pairs = [(request.question, doc.page_content) for doc in docs]
+            scores = cross_encoder_reranker.predict(pairs)
+            ranked_docs = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
+            docs = [doc for score, doc in ranked_docs[:6]] # Select top 6 for debug display
 
         retrieved_chunks = []
         for i, doc in enumerate(docs):
@@ -582,10 +607,11 @@ async def debug_search(request: DebugRequest):
         return {
             "question": request.question,
             "total_chunks_retrieved": len(docs),
+            "retrieval_method": "hybrid" if hybrid_retriever else "vector_only",
+            "re_ranking_applied": cross_encoder_reranker is not None, # Indicate if re-ranking was used
             "chunks": retrieved_chunks,
             "decision_engine_analysis": {
                 "coordination_of_benefits_detected": has_cob,
-                "retrieval_method": "hybrid" if hybrid_retriever else "vector_only"
             }
         }
 
@@ -593,7 +619,7 @@ async def debug_search(request: DebugRequest):
         raise HTTPException(status_code=500, detail=f"Debug search error: {str(e)}")
 
 
-# --- MODIFIED: run_enhanced_query to return SimpleAnswerResponse ---
+# --- MODIFIED: run_enhanced_query to return SimpleAnswerResponse and use new features ---
 @app.post("/hackrx/run", response_model=SimpleAnswerResponse)
 async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_token)):
     global vector_store, hybrid_retriever, processed_documents_global
@@ -612,7 +638,6 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
         # Step 0: LLM Parser - Extract structured query details if not provided
         if not effective_claim_details and request.questions:
             audit_trail.append("Attempting LLM-powered claim details extraction.")
-            # Use the first question for overall claim details parsing
             parsed_details = parse_claim_details_from_llm(request.questions[0], llm)
             if parsed_details:
                 effective_claim_details.update(parsed_details)
@@ -626,35 +651,59 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
         else:
             audit_trail.append("No claim details provided and no questions to parse from. Proceeding without specific claim details.")
 
-
-        # Step 1: Process documents
-        # This will return a List[Document] from various sources
+        # Step 1: Document Processing and FAISS Index Management (Persistence)
         loaded_docs_from_input = process_input_documents(request.documents)
         audit_trail.append(f"Input documents processed. Total loaded documents: {len(loaded_docs_from_input)}")
 
         if not loaded_docs_from_input:
-            # If no docs are loaded, we can't answer contextually.
-            # This shouldn't be reached if process_input_documents raises HTTPException for bad URLs.
             raise HTTPException(status_code=400, detail="No valid document content could be extracted or provided for analysis.")
 
         chunks = text_splitter.split_documents(loaded_docs_from_input)
         print(f"Created {len(chunks)} chunks from documents")
         audit_trail.append(f"Created {len(chunks)} document chunks from all inputs")
 
-        # Create or update vector store
-        if vector_store is None:
-            print("Creating new vector store...")
-            vector_store = FAISS.from_documents(chunks, embeddings)
-            processed_documents_global = chunks
-            print("✅ Vector store created successfully")
-            audit_trail.append("New vector store created from all document chunks.")
-        else:
-            print(f"Adding {len(chunks)} documents to existing vector store...")
+        # --- NEW: Load FAISS index if it exists, otherwise create ---
+        if vector_store is None: # Only load/create if not already in memory from previous requests
+            if os.path.exists(FAISS_INDEX_PATH):
+                print(f"🔄 Loading existing FAISS index from {FAISS_INDEX_PATH}...")
+                try:
+                    vector_store = FAISS.load_local(FAISS_INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
+                    # We need to re-add documents from input as they might be new or updated
+                    vector_store.add_documents(chunks)
+                    processed_documents_global.extend(chunks) # Keep track of all processed docs for BM25
+                    print("✅ FAISS index loaded and updated successfully.")
+                    audit_trail.append("Existing FAISS index loaded and updated with new documents.")
+                except Exception as e:
+                    print(f"❌ Error loading FAISS index: {e}. Rebuilding from scratch.")
+                    vector_store = FAISS.from_documents(chunks, embeddings)
+                    processed_documents_global = chunks
+                    print("✅ New FAISS index created.")
+                    audit_trail.append("Failed to load FAISS, rebuilt new index.")
+            else:
+                print("✨ Creating new FAISS index...")
+                vector_store = FAISS.from_documents(chunks, embeddings)
+                processed_documents_global = chunks
+                print("✅ New FAISS index created successfully.")
+                audit_trail.append("New FAISS index created.")
+        else: # Vector store already exists in memory, just add new documents
+            print(f"Adding {len(chunks)} documents to existing in-memory vector store...")
             vector_store.add_documents(chunks)
             processed_documents_global.extend(chunks)
-            print("✅ Documents added to existing vector store.")
-            audit_trail.append(f"{len(chunks)} new document chunks added to existing vector store.")
+            print("✅ Documents added to existing in-memory vector store.")
+            audit_trail.append(f"{len(chunks)} new document chunks added to existing in-memory vector store.")
 
+        # --- NEW: Save FAISS index after updates ---
+        if vector_store is not None:
+            try:
+                vector_store.save_local(FAISS_INDEX_PATH)
+                print(f"💾 FAISS index saved to {FAISS_INDEX_PATH}")
+                audit_trail.append("FAISS index saved to disk.")
+            except Exception as e:
+                print(f"⚠️ Could not save FAISS index: {e}")
+                audit_trail.append(f"Failed to save FAISS index: {e}")
+
+
+        # Initialize/Re-initialize hybrid retriever with all current documents
         hybrid_retriever = HybridRetriever(vector_store, processed_documents_global)
         audit_trail.append("Hybrid retriever re-initialized with current document set.")
 
@@ -668,10 +717,29 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
                 print(f"Processing question: {question}")
                 audit_trail.append(f"Processing question: '{question[:70]}...'")
 
-                relevant_docs = hybrid_retriever.retrieve_relevant_docs(question, k=8)
+                # Retrieve relevant documents using hybrid approach
+                relevant_docs = hybrid_retriever.retrieve_relevant_docs(question, k=10) # Retrieve more for re-ranking
 
-                if relevant_docs:
-                    context = "\n\n".join([doc.page_content for doc in relevant_docs])
+                # --- NEW: Re-ranking step ---
+                if cross_encoder_reranker and relevant_docs:
+                    pairs = [(question, doc.page_content) for doc in relevant_docs]
+                    scores = cross_encoder_reranker.predict(pairs)
+                    # Sort documents by score in descending order
+                    ranked_docs_with_scores = sorted(zip(scores, relevant_docs), key=lambda x: x[0], reverse=True)
+                    # Select top N documents after re-ranking (e.g., top 4 or 6)
+                    k_reranked = min(6, len(ranked_docs_with_scores)) # Don't take more than available
+                    top_reranked_docs = [doc for score, doc in ranked_docs_with_scores[:k_reranked]]
+                    context = "\n\n".join([doc.page_content for doc in top_reranked_docs])
+                    audit_trail.append(f"Re-ranking applied. Using top {k_reranked} documents.")
+                elif relevant_docs:
+                    context = "\n\n".join([doc.page_content for doc in relevant_docs[:6]]) # Fallback to top 6 if no re-ranker
+                    audit_trail.append("Re-ranking skipped. Using top 6 documents from hybrid retrieval.")
+                else:
+                    context = "" # No relevant documents found
+                    audit_trail.append("No relevant documents found, context is empty.")
+
+                # Only proceed to LLM if there's context or explicit claim details
+                if context or effective_claim_details:
                     claim_details_for_llm = json.dumps(effective_claim_details, indent=2) if effective_claim_details else "{}"
                     formatted_prompt = ENHANCED_CLAIM_PROMPT.format(
                         context=context,
@@ -683,7 +751,6 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
                     response_text = llm_result.content if hasattr(llm_result, 'content') else str(llm_result)
 
                     # Parse structured response from LLM (using internal model for parsing)
-                    # This now expects a 'reasoning' field that contains the direct answer
                     parsed_llm_output = parse_llm_response(response_text)
 
                     # Extract the reasoning (which is now our desired answer)
@@ -692,9 +759,10 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
                     audit_trail.append(f"Answer generated for '{question[:50]}...': {answer_string[:70]}...")
 
                 else:
+                    # If no context and no relevant claim details, provide a standard "not found" answer
                     answer_string = "Information not found or unclear for this question in the provided documents."
                     final_answers.append(answer_string)
-                    audit_trail.append(f"No relevant documents found for '{question[:50]}...'. Answered: {answer_string[:70]}...")
+                    audit_trail.append(f"No context found and no claim details. Answered: {answer_string[:70]}...")
 
             except Exception as e:
                 print(f"❌ Error processing question '{question}': {str(e)}")
@@ -728,11 +796,13 @@ if __name__ == "__main__":
     print("🎯 HackRx 6.0 Features:")
     print("   - Insurance claim decision engine (internal)")
     print("   - Coordination of benefits analysis (internal)")
-    print("   - **STRICT API Output: {'answers': [...] }**") # Highlight new output
+    print("   - **STRICT API Output: {'answers': [...] }**")
     print("   - Hybrid retrieval (Vector + BM25)")
+    print("   - **Re-ranking of retrieved documents (for better accuracy)**")
+    print("   - **Persistent FAISS Indexing (improves latency after first run/restart)**")
     print("   - PDF document processing")
     print("   - LLM-powered query parsing for claim details")
-    print("   - **Robust local file path detection in document URLs**") # Highlight new check
-    print("   - **Prompt examples for concise answers**") # Highlight new prompt feature
+    print("   - Robust local file path detection in document URLs")
+    print("   - Prompt examples for concise answers")
 
     uvicorn.run(app, host=HOST, port=PORT)
