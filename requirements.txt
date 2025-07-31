@@ -1,12 +1,16 @@
-fastapi
-uvicorn
 langchain
-langchain-community
+langchain-community>=0.0.30  # Make sure this is a recent version (0.0.30 or higher)
 langchain-groq
 langchain-huggingface
-pydantic
-requests
-python-dotenv
-pypdf
 faiss-cpu
-typing-extensions
+pypdf
+requests
+rank-bm25
+python-dotenv
+uvicorn
+fastapi
+# For Unstructured loaders:
+unstructured
+python-docx # For .docx files
+eml_parser  # For .eml files
+lxml        # Often a dependency for unstructured
