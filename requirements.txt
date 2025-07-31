@@ -1,5 +1,5 @@
 langchain
-langchain-community>=0.0.30  # Make sure this is a recent version (0.0.30 or higher)
+langchain-community>=0.0.30  # MUST be at least 0.0.30 for UnstructuredLoaders
 langchain-groq
 langchain-huggingface
 faiss-cpu
@@ -9,8 +9,7 @@ rank-bm25
 python-dotenv
 uvicorn
 fastapi
-# For Unstructured loaders:
 unstructured
-python-docx # For .docx files
-eml_parser  # For .eml files
-lxml        # Often a dependency for unstructured
+python-docx
+eml_parser
+lxml
