@@ -9,3 +9,4 @@ rank-bm25
 python-dotenv
 uvicorn
 fastapi
+sentence-transformers # <-- This line needs to be added/present
