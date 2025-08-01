@@ -18,7 +18,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 # --- NEW/MODIFIED IMPORTS for Google Gemini ---
 from langchain_google_genai import ChatGoogleGenerativeAI
-# --- END NEW/MODIFIED IMPORTS ---
+# --- NEW/RE-ADDED: For re-ranking ---
+from sentence_transformers import CrossEncoder
 
 # Load environment variables from .env file
 load_dotenv()
@@ -41,13 +42,13 @@ try:
     from langchain.retrievers import EnsembleRetriever
     from langchain_community.retrievers import BM25Retriever
     from langchain_core.exceptions import OutputParserException
-
-    print("✅ All necessary LangChain imports successful")
+    # --- CrossEncoder is imported from sentence_transformers ---
+    print("✅ All necessary LangChain and re-ranker imports successful")
 except ImportError as e:
     print(f"❌ Import error: {e}")
-    # Updated pip install message for Gemini AI Studio setup
     print("Please install missing dependencies:")
-    print("pip install langchain langchain-community langchain-google-genai langchain-huggingface faiss-cpu pypdf requests rank-bm25")
+    # Updated pip install message for re-ranker
+    print("pip install langchain langchain-community langchain-google-genai langchain-huggingface faiss-cpu pypdf requests rank-bm25 sentence-transformers")
     exit(1)
 except Exception as e:
     print(f"❌ General import error: {e}")
@@ -66,7 +67,7 @@ class ClaimDecisionInternal(BaseModel):
     reasoning: str # This will be the answer string for the SimpleAnswerResponse
     policy_sections_referenced: List[str] = Field(default_factory=list)
     exclusions_applied: List[str] = Field(default_factory=list)
-    coordination_of_benefits: Optional[Dict[str, Any]] = None
+    coordination_of_benefits: Optional[Dict[str, Any]] = None # Use Dict here for simpler parsing
     processing_notes: List[str] = Field(default_factory=list)
 
 # --- Other unchanged request/parsing models ---
@@ -160,7 +161,7 @@ IMPORTANT RULES:
 - Base decisions ONLY on information in the policy context and provided claim details.
 - For coordination of benefits, if 'has_other_insurance' is true, assume primary_payment is the amount already paid by primary insurer, and calculate remaining_amount from the requested amount and policy limits.
 - Include confidence scores based on clarity of policy language and completeness of claim details.
-- Reference specific policy sections (e.g., 'Section A', 'Clause 3.1') in your reasoning and 'policy_sections_referenced' list.
+- **Reference specific policy sections (e.g., 'Section A', 'Clause 3.1') AND original document/page information (e.g., 'Document: policy.pdf, Page 3') in your reasoning and 'policy_sections_referenced' list.**
 - If information is unclear, ambiguous, or missing for a conclusive decision, use "PENDING_REVIEW" decision and explain why in reasoning.
 - The 'reasoning' field MUST contain the direct answer to the question.
 
@@ -326,6 +327,7 @@ class HybridRetriever:
 # Initialize components with enhanced error handling
 embeddings = None
 llm = None
+cross_encoder_reranker = None # --- NEW: Cross-encoder re-ranker model declaration ---
 
 # --- Embeddings Initialization ---
 try:
@@ -351,7 +353,7 @@ if GOOGLE_API_KEY:
     print("Attempting to initialize Google Gemini LLM via AI Studio API Key...")
     try:
         llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash", # Changed to flash as per your request
+            model="gemini-1.5-flash", # Using Flash as per current requirement
             google_api_key=GOOGLE_API_KEY, # Pass the simple API key directly
             temperature=0
         )
@@ -363,6 +365,16 @@ if GOOGLE_API_KEY:
 else:
     print("❌ GOOGLE_API_KEY is not set. LLM will not be initialized.")
     llm = None
+
+# --- NEW: Initialize Cross-Encoder for re-ranking ---
+try:
+    # Using a very small cross-encoder model to minimize memory footprint
+    cross_encoder_reranker = CrossEncoder('cross-encoder/ms-marco-TinyBERT-L-2-v2')
+    print("✅ Cross-Encoder re-ranker initialized successfully")
+except Exception as e:
+    print(f"❌ Error initializing Cross-Encoder re-ranker: {e}. Re-ranking will be skipped.")
+    cross_encoder_reranker = None
+
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1000,
@@ -525,12 +537,13 @@ def root():
             "Coordination of benefits analysis (internal)",
             "**STRICT API Output: {'answers': [...] }**",
             "Hybrid retrieval (Vector + BM25)",
+            "**Re-ranking of retrieved documents (for better accuracy)**", # Re-added feature
             "**Persistent FAISS Indexing (improves latency after first run/restart)**",
             "PDF document processing",
             "LLM-powered query parsing for claim details",
             "Robust local file path detection in document URLs",
             "Prompt examples for concise answers",
-            "**Primary LLM: Google Gemini 1.5 Flash (via AI Studio API Key)**" # Highlight new LLM
+            "**Primary LLM: Google Gemini 1.5 Flash (via AI Studio API Key)**"
         ],
         "supported_formats": ["text", "pdf_urls"],
         "endpoints": {
@@ -552,6 +565,7 @@ def health_check():
         "vector_store_ready": vector_store is not None,
         "decision_engine_ready": decision_engine is not None,
         "hybrid_retriever_ready": hybrid_retriever is not None,
+        "cross_encoder_reranker_ready": cross_encoder_reranker is not None, # Check re-ranker status
         "processed_documents_count": len(processed_documents_global)
     }
 
@@ -564,17 +578,28 @@ async def debug_search(request: DebugRequest):
         raise HTTPException(status_code=400, detail="No vector store available. Please run /hackrx/run with documents first.")
 
     try:
+        # Retrieve more documents for debug search for better re-ranking visualization
         if hybrid_retriever:
-            docs = hybrid_retriever.retrieve_relevant_docs(request.question, k=8) # Retrieve more for debug
+            docs = hybrid_retriever.retrieve_relevant_docs(request.question, k=15)
         else:
             retriever = vector_store.as_retriever(
                 search_type="similarity",
-                search_kwargs={"k": 8, "fetch_k": 16}
+                search_kwargs={"k": 15, "fetch_k": 30}
             )
             docs = retriever.get_relevant_documents(request.question)
 
+        # --- NEW: Re-ranking for Debug Search too ---
+        if cross_encoder_reranker and docs:
+            pairs = [(request.question, doc.page_content) for doc in docs]
+            scores = cross_encoder_reranker.predict(pairs)
+            ranked_docs = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
+            docs_to_display = [doc for score, doc in ranked_docs[:8]] # Display top 8 after re-ranking
+        else:
+            docs_to_display = docs[:8] # Display top 8 from hybrid if no re-ranker
+
+
         retrieved_chunks = []
-        for i, doc in enumerate(docs):
+        for i, doc in enumerate(docs_to_display):
             retrieved_chunks.append({
                 "chunk_id": i,
                 "content": doc.page_content[:500] + "..." if len(doc.page_content) > 500 else doc.page_content,
@@ -584,15 +609,16 @@ async def debug_search(request: DebugRequest):
             })
 
         has_cob = decision_engine.detect_coordination_of_benefits(
-            " ".join([doc.page_content for doc in docs]),
+            " ".join([doc.page_content for doc in docs_to_display]), # Use re-ranked docs for COB detection too
             request.question
         )
 
         return {
             "question": request.question,
-            "total_chunks_retrieved": len(docs),
+            "total_chunks_retrieved_before_rerank": len(docs),
+            "total_chunks_displayed_after_rerank": len(docs_to_display),
             "retrieval_method": "hybrid" if hybrid_retriever else "vector_only",
-            "re_ranking_applied": False, # Explicitly state re-ranking is OFF
+            "re_ranking_applied": cross_encoder_reranker is not None, # Indicate if re-ranking was used
             "chunks": retrieved_chunks,
             "decision_engine_analysis": {
                 "coordination_of_benefits_detected": has_cob,
@@ -642,6 +668,10 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
 
         if not loaded_docs_from_input:
             raise HTTPException(status_code=400, detail="No valid document content could be extracted or provided for analysis.")
+
+        # --- IMPORTANT: Populate metadata for documents before chunking if needed ---
+        # For PDFs, loader should add 'source' and 'page' automatically.
+        # For raw text, you might want to add custom metadata like {'source': 'Direct Text Input'}
 
         chunks = text_splitter.split_documents(loaded_docs_from_input)
         print(f"Created {len(chunks)} chunks from documents")
@@ -702,14 +732,35 @@ async def run_enhanced_query(request: ClaimRequest, token: str = Depends(verify_
                 print(f"Processing question: {question}")
                 audit_trail.append(f"Processing question: '{question[:70]}...'")
 
-                # Retrieve relevant documents using hybrid approach (K increased to 10 for potentially better initial recall)
-                relevant_docs = hybrid_retriever.retrieve_relevant_docs(question, k=10)
+                # Retrieve more documents for better re-ranking performance
+                relevant_docs = hybrid_retriever.retrieve_relevant_docs(question, k=15) # Increased retrieval for re-ranker
 
-                # --- Simplified context generation ---
-                if relevant_docs:
-                    # Take top 6 from hybrid retrieval as context for LLM
-                    context = "\n\n".join([doc.page_content for doc in relevant_docs[:6]])
-                    audit_trail.append(f"Using top {min(len(relevant_docs), 6)} documents from hybrid retrieval for context.")
+                # --- NEW: Re-ranking step ---
+                if cross_encoder_reranker and relevant_docs:
+                    pairs = [(question, doc.page_content) for doc in relevant_docs]
+                    scores = cross_encoder_reranker.predict(pairs)
+                    # Sort documents by score in descending order
+                    ranked_docs_with_scores = sorted(zip(scores, relevant_docs), key=lambda x: x[0], reverse=True)
+                    # Select top N documents after re-ranking (e.g., top 6) for context
+                    k_final_context = min(6, len(ranked_docs_with_scores))
+                    top_context_docs = [doc for score, doc in ranked_docs_with_scores[:k_final_context]]
+                    # Format context with source/page for LLM guidance
+                    context_parts = []
+                    for doc in top_context_docs:
+                        source_info = doc.metadata.get('source', 'Unknown Document')
+                        page_info = doc.metadata.get('page', 'N/A')
+                        context_parts.append(f"--- Document: {os.path.basename(source_info)} - Page: {page_info} ---\n{doc.page_content}")
+                    context = "\n\n".join(context_parts)
+                    audit_trail.append(f"Re-ranking applied. Using top {k_final_context} documents with metadata for context.")
+                elif relevant_docs: # Fallback if re-ranker is not initialized or no docs after initial retrieval
+                    # Take top 6 from hybrid retrieval as context for LLM, format with metadata
+                    context_parts = []
+                    for doc in relevant_docs[:6]:
+                        source_info = doc.metadata.get('source', 'Unknown Document')
+                        page_info = doc.metadata.get('page', 'N/A')
+                        context_parts.append(f"--- Document: {os.path.basename(source_info)} - Page: {page_info} ---\n{doc.page_content}")
+                    context = "\n\n".join(context_parts)
+                    audit_trail.append(f"Re-ranking skipped. Using top {min(len(relevant_docs), 6)} documents from hybrid retrieval for context.")
                 else:
                     context = "" # No relevant documents found
                     audit_trail.append("No relevant documents found, context is empty.")
@@ -775,11 +826,12 @@ if __name__ == "__main__":
     print("   - Coordination of benefits analysis (internal)")
     print("   - **STRICT API Output: {'answers': [...] }**")
     print("   - Hybrid retrieval (Vector + BM25)")
-    "   - **Persistent FAISS Indexing (improves latency after first run/restart)**"
+    print("   - **Re-ranking of retrieved documents (for better accuracy)**") # Re-added feature
+    print("   - **Persistent FAISS Indexing (improves latency after first run/restart)**")
     print("   - PDF document processing")
     print("   - LLM-powered query parsing for claim details")
     print("   - Robust local file path detection in document URLs")
     print("   - Prompt examples for concise answers")
-    print("   - **Primary LLM: Google Gemini 1.5 Flash (via AI Studio API Key)**") # Highlight new LLM
+    print("   - **Primary LLM: Google Gemini 1.5 Flash (via AI Studio API Key)**")
 
     uvicorn.run(app, host=HOST, port=PORT)
